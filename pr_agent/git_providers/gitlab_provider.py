@@ -3,6 +3,7 @@ import hashlib
 import re
 from typing import Optional, Tuple, Any, Union
 from urllib.parse import urlparse, parse_qs
+import urllib.parse
 
 import gitlab
 import requests
@@ -32,34 +33,14 @@ class GitLabProvider(GitProvider):
         if not gitlab_url:
             raise ValueError("GitLab URL is not set in the config file")
         self.gitlab_url = gitlab_url
-        ssl_verify = get_settings().get("GITLAB.SSL_VERIFY", True)
         gitlab_access_token = get_settings().get("GITLAB.PERSONAL_ACCESS_TOKEN", None)
         if not gitlab_access_token:
             raise ValueError("GitLab personal access token is not set in the config file")
-        # Authentication method selection via configuration
-        auth_method = get_settings().get("GITLAB.AUTH_TYPE", "oauth_token")
-        
-        # Basic validation of authentication type
-        if auth_method not in ["oauth_token", "private_token"]:
-            raise ValueError(f"Unsupported GITLAB.AUTH_TYPE: '{auth_method}'. "
-                           f"Must be 'oauth_token' or 'private_token'.")
-        
-        # Create GitLab instance based on authentication method
-        try:
-            if auth_method == "oauth_token":
-                self.gl = gitlab.Gitlab(
-                    url=gitlab_url,
-                    oauth_token=gitlab_access_token,
-                    ssl_verify=ssl_verify
-                )
-            else:  # private_token
-                self.gl = gitlab.Gitlab(
-                    url=gitlab_url,
-                    private_token=gitlab_access_token
-                )
-        except Exception as e:
-            get_logger().error(f"Failed to create GitLab instance: {e}")
-            raise ValueError(f"Unable to authenticate with GitLab: {e}")
+        self.gl = gitlab.Gitlab(
+            url=gitlab_url,
+            oauth_token=gitlab_access_token,
+            ssl_verify=get_settings().get("GITLAB.SSL_VERIFY", True),
+        )
         self.max_comment_chars = 65000
         self.id_project = None
         self.id_mr = None
@@ -73,6 +54,194 @@ class GitLabProvider(GitProvider):
             r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@[ ]?(.*)")
         self.incremental = incremental
 
+    # --- submodule expansion helpers (opt-in) ---
+    def _get_gitmodules_map(self) -> dict[str, str]:
+        """
+        Return {submodule_path -> repo_url} from '.gitmodules' (best effort).
+        Tries target branch first, then source branch. Always returns text.
+        """
+        try:
+            proj = self.gl.projects.get(self.id_project)
+        except Exception:
+            return {}
+
+        import base64
+
+        def _read_text(ref: str | None) -> str | None:
+            if not ref:
+                return None
+            try:
+                f = proj.files.get(file_path=".gitmodules", ref=ref)
+            except Exception:
+                return None
+
+            # 1) python-gitlab File.decode() – usually returns BYTES
+            try:
+                raw = f.decode()
+                if isinstance(raw, (bytes, bytearray)):
+                    return raw.decode("utf-8", "ignore")
+                if isinstance(raw, str):
+                    return raw
+            except Exception:
+                pass
+
+            # 2) fallback: base64 decode f.content
+            try:
+                c = getattr(f, "content", None)
+                if c:
+                    return base64.b64decode(c).decode("utf-8", "ignore")
+            except Exception:
+                pass
+
+            return None
+
+        content = (
+            _read_text(getattr(self.mr, "target_branch", None))
+            or _read_text(getattr(self.mr, "source_branch", None))
+        )
+        if not content:
+            return {}
+
+        out: dict[str, str] = {}
+        cur_path: str | None = None
+        for line in content.splitlines():
+            s = line.strip()  # ensure 's' is str
+            if s.startswith("[submodule"):
+                cur_path = None
+            elif s.startswith("path ="):
+                cur_path = s.split("=", 1)[1].strip()
+            elif s.startswith("url =") and cur_path:
+                out[cur_path] = s.split("=", 1)[1].strip()
+        return out
+
+    def _url_to_project_path(self, url: str) -> str | None:
+        """
+        Convert ssh/https GitLab URL to 'group/subgroup/repo' project path.
+        """
+        try:
+            if url.startswith("git@") and ":" in url:
+                path = url.split(":", 1)[1]
+            else:
+                path = urllib.parse.urlparse(url).path.lstrip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            return path or None
+        except Exception:
+            return None
+
+    def _project_by_path(self, proj_path: str):
+        """
+        Resolve a project by path with multiple strategies:
+        1) URL-encoded path_with_namespace
+        2) Raw path_with_namespace
+        3) Search fallback + exact match on path_with_namespace (case-insensitive)
+        Returns a project object or None.
+        """
+        if not proj_path:
+            return None
+
+        # 1) Encoded
+        try:
+            enc = urllib.parse.quote_plus(proj_path)
+            return self.gl.projects.get(enc)
+        except Exception:
+            pass
+
+        # 2) Raw
+        try:
+            return self.gl.projects.get(proj_path)
+        except Exception:
+            pass
+
+        # 3) Search fallback
+        try:
+            name = proj_path.split("/")[-1]
+            # membership=True so we don't leak other people's repos
+            matches = self.gl.projects.list(search=name, simple=True, membership=True, per_page=100)
+            # prefer exact path_with_namespace match (case-insensitive)
+            for p in matches:
+                pwn = getattr(p, "path_with_namespace", "")
+                if pwn.lower() == proj_path.lower():
+                    return self.gl.projects.get(p.id)
+            # as a last resort, first match of that name
+            if matches:
+                return self.gl.projects.get(matches[0].id)
+        except Exception:
+            pass
+
+        return None
+
+    def _compare_submodule(self, proj_path: str, old_sha: str, new_sha: str) -> list[dict]:
+        """
+        Call repository_compare on submodule project; return list of diffs.
+        """
+        try:
+            proj = self._project_by_path(proj_path)
+            if proj is None:
+                get_logger().warning(f"[submodule] resolve failed for {proj_path}")
+                return []
+            cmp = proj.repository_compare(old_sha, new_sha)
+            if isinstance(cmp, dict):
+                return cmp.get("diffs", []) or []
+            return []
+        except Exception as e:
+            get_logger().warning(f"[submodule] compare failed for {proj_path} {old_sha}..{new_sha}: {e}")
+            return []
+
+    def _expand_submodule_changes(self, changes: list[dict]) -> list[dict]:
+        """
+        If enabled, expand 'Subproject commit' bumps into real file diffs from the submodule.
+        Soft-fail on any issue.
+        """
+        try:
+            if not bool(get_settings().get("GITLAB.EXPAND_SUBMODULE_DIFFS", False)):
+                return changes
+        except Exception:
+            return changes
+
+        gitmodules = self._get_gitmodules_map()
+        if not gitmodules:
+            return changes
+
+        out = list(changes)
+        for ch in changes:
+            patch = ch.get("diff") or ""
+            if "Subproject commit" not in patch:
+                continue
+
+            # Extract old/new SHAs from the hunk
+            old_m = re.search(r"^-Subproject commit ([0-9a-f]{7,40})", patch, re.M)
+            new_m = re.search(r"^\+Subproject commit ([0-9a-f]{7,40})", patch, re.M)
+            if not (old_m and new_m):
+                continue
+            old_sha, new_sha = old_m.group(1), new_m.group(1)
+
+            sub_path = ch.get("new_path") or ch.get("old_path") or ""
+            repo_url = gitmodules.get(sub_path)
+            if not repo_url:
+                get_logger().warning(f"[submodule] no url for '{sub_path}' in .gitmodules (skip)")
+                continue
+
+            proj_path = self._url_to_project_path(repo_url)
+            if not proj_path:
+                get_logger().warning(f"[submodule] cannot parse project path from url '{repo_url}' (skip)")
+                continue
+
+            get_logger().info(f"[submodule] {sub_path} url={repo_url} -> proj_path={proj_path}")
+            sub_diffs = self._compare_submodule(proj_path, old_sha, new_sha)
+            for sd in sub_diffs:
+                sd_diff = sd.get("diff") or ""
+                sd_old = sd.get("old_path") or sd.get("a_path") or ""
+                sd_new = sd.get("new_path") or sd.get("b_path") or sd_old
+                out.append({
+                    "old_path": f"{sub_path}/{sd_old}" if sd_old else sub_path,
+                    "new_path": f"{sub_path}/{sd_new}" if sd_new else sub_path,
+                    "diff": sd_diff,
+                    "new_file": sd.get("new_file", False),
+                    "deleted_file": sd.get("deleted_file", False),
+                    "renamed_file": sd.get("renamed_file", False),
+                })
+        return out
 
     def is_supported(self, capability: str) -> bool:
         if capability in ['get_issue_comments', 'create_inline_comment', 'publish_inline_comments',
@@ -194,7 +363,9 @@ class GitLabProvider(GitProvider):
             return self.diff_files
 
         # filter files using [ignore] patterns
-        diffs_original = self.mr.changes()['changes']
+        raw_changes = self.mr.changes().get('changes', [])
+        raw_changes = self._expand_submodule_changes(raw_changes)
+        diffs_original = raw_changes
         diffs = filter_ignored(diffs_original, 'gitlab')
         if diffs != diffs_original:
             try:
@@ -264,7 +435,9 @@ class GitLabProvider(GitProvider):
 
     def get_files(self) -> list:
         if not self.git_files:
-            self.git_files = [change['new_path'] for change in self.mr.changes()['changes']]
+            raw_changes = self.mr.changes().get('changes', [])
+            raw_changes = self._expand_submodule_changes(raw_changes)
+            self.git_files = [c.get('new_path') for c in raw_changes if c.get('new_path')]
         return self.git_files
 
     def publish_description(self, pr_title: str, pr_body: str):
@@ -420,7 +593,9 @@ class GitLabProvider(GitProvider):
                     get_logger().exception(f"Failed to create comment in MR {self.id_mr}")
 
     def get_relevant_diff(self, relevant_file: str, relevant_line_in_file: str) -> Optional[dict]:
-        changes = self.mr.changes()  # Retrieve the changes for the merge request once
+        _changes = self.mr.changes()  # dict
+        _changes['changes'] = self._expand_submodule_changes(_changes.get('changes', []))
+        changes = _changes
         if not changes:
             get_logger().error('No changes found for the merge request.')
             return None
@@ -583,52 +758,10 @@ class GitLabProvider(GitProvider):
         return self.id_project.split('/')[0]
 
     def add_eyes_reaction(self, issue_comment_id: int, disable_eyes: bool = False) -> Optional[int]:
-        if disable_eyes:
-            return None
-        try:
-            if not self.id_mr:
-                get_logger().warning("Cannot add eyes reaction: merge request ID is not set.")
-                return None
-            
-            mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
-            comment = mr.notes.get(issue_comment_id)
-            
-            if not comment:
-                get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
-                return None
-            
-            award_emoji = comment.awardemojis.create({
-                'name': 'eyes'
-            })
-            return award_emoji.id
-        except Exception as e:
-            get_logger().warning(f"Failed to add eyes reaction, error: {e}")
-            return None
+        return True
 
-    def remove_reaction(self, issue_comment_id: int, reaction_id: str) -> bool:
-        try:
-            if not self.id_mr:
-                get_logger().warning("Cannot remove reaction: merge request ID is not set.")
-                return False
-            
-            mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
-            comment = mr.notes.get(issue_comment_id)
-
-            if not comment:
-                get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
-                return False
-            
-            reactions = comment.awardemojis.list()
-            for reaction in reactions:
-                if reaction.name == reaction_id:
-                    reaction.delete()
-                    return True
-            
-            get_logger().warning(f"Reaction '{reaction_id}' not found in comment {issue_comment_id}.")
-            return False
-        except Exception as e:
-            get_logger().warning(f"Failed to remove reaction, error: {e}")
-            return False
+    def remove_reaction(self, issue_comment_id: int, reaction_id: int) -> bool:
+        return True
 
     def _parse_merge_request_url(self, merge_request_url: str) -> Tuple[str, int]:
         parsed_url = urlparse(merge_request_url)
@@ -741,7 +874,7 @@ class GitLabProvider(GitProvider):
             get_logger().error(f"Repo URL: {repo_url_to_clone} is not a valid gitlab URL.")
             return None
         (scheme, base_url) = repo_url_to_clone.split("gitlab.")
-        access_token = getattr(self.gl, 'oauth_token', None) or getattr(self.gl, 'private_token', None)
+        access_token = self.gl.oauth_token
         if not all([scheme, access_token, base_url]):
             get_logger().error(f"Either no access token found, or repo URL: {repo_url_to_clone} "
                                f"is missing prefix: {scheme} and/or base URL: {base_url}.")
