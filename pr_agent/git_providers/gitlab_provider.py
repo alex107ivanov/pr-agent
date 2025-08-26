@@ -1,13 +1,14 @@
 import difflib
 import hashlib
 import re
-from typing import Optional, Tuple, Any, Union
-from urllib.parse import urlparse, parse_qs
 import urllib.parse
+from typing import Any, Optional, Tuple, Union
+from urllib.parse import parse_qs, urlparse
 
 import gitlab
 import requests
-from gitlab import GitlabGetError, GitlabAuthenticationError, GitlabCreateError, GitlabUpdateError
+from gitlab import (GitlabAuthenticationError, GitlabCreateError,
+                    GitlabGetError, GitlabUpdateError)
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
@@ -39,12 +40,12 @@ class GitLabProvider(GitProvider):
             raise ValueError("GitLab personal access token is not set in the config file")
         # Authentication method selection via configuration
         auth_method = get_settings().get("GITLAB.AUTH_TYPE", "oauth_token")
-        
+
         # Basic validation of authentication type
         if auth_method not in ["oauth_token", "private_token"]:
             raise ValueError(f"Unsupported GITLAB.AUTH_TYPE: '{auth_method}'. "
                            f"Must be 'oauth_token' or 'private_token'.")
-        
+
         # Create GitLab instance based on authentication method
         try:
             if auth_method == "oauth_token":
@@ -85,34 +86,18 @@ class GitLabProvider(GitProvider):
         except Exception:
             return {}
 
-        import base64
-
         def _read_text(ref: str | None) -> str | None:
             if not ref:
                 return None
             try:
                 f = proj.files.get(file_path=".gitmodules", ref=ref)
-            except Exception:
-                return None
-
-            # 1) python-gitlab File.decode() – usually returns BYTES
-            try:
                 raw = f.decode()
                 if isinstance(raw, (bytes, bytearray)):
                     return raw.decode("utf-8", "ignore")
                 if isinstance(raw, str):
                     return raw
             except Exception:
-                pass
-
-            # 2) fallback: base64 decode f.content
-            try:
-                c = getattr(f, "content", None)
-                if c:
-                    return base64.b64decode(c).decode("utf-8", "ignore")
-            except Exception:
-                pass
-
+                return None
             return None
 
         content = (
@@ -341,11 +326,11 @@ class GitLabProvider(GitProvider):
         """Create or update a file in the GitLab repository."""
         try:
             project = self.gl.projects.get(self.id_project)
-            
+
             if not message:
                 action = "Update" if contents else "Create"
                 message = f"{action} {file_path}"
-            
+
             try:
                 existing_file = project.files.get(file_path, branch)
                 existing_file.content = contents
@@ -784,14 +769,14 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot add eyes reaction: merge request ID is not set.")
                 return None
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
-            
+
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return None
-            
+
             award_emoji = comment.awardemojis.create({
                 'name': 'eyes'
             })
@@ -805,20 +790,20 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot remove reaction: merge request ID is not set.")
                 return False
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
 
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return False
-            
+
             reactions = comment.awardemojis.list()
             for reaction in reactions:
                 if reaction.name == reaction_id:
                     reaction.delete()
                     return True
-            
+
             get_logger().warning(f"Reaction '{reaction_id}' not found in comment {issue_comment_id}.")
             return False
         except Exception as e:
