@@ -1,13 +1,14 @@
 import difflib
 import hashlib
 import re
-from typing import Optional, Tuple, Any, Union
-from urllib.parse import urlparse, parse_qs
 import urllib.parse
+from typing import Any, Optional, Tuple, Union
+from urllib.parse import parse_qs, urlparse
 
 import gitlab
 import requests
-from gitlab import GitlabGetError, GitlabAuthenticationError, GitlabCreateError, GitlabUpdateError
+from gitlab import (GitlabAuthenticationError, GitlabCreateError,
+                    GitlabGetError, GitlabUpdateError)
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
@@ -39,12 +40,12 @@ class GitLabProvider(GitProvider):
             raise ValueError("GitLab personal access token is not set in the config file")
         # Authentication method selection via configuration
         auth_method = get_settings().get("GITLAB.AUTH_TYPE", "oauth_token")
-        
+
         # Basic validation of authentication type
         if auth_method not in ["oauth_token", "private_token"]:
             raise ValueError(f"Unsupported GITLAB.AUTH_TYPE: '{auth_method}'. "
                            f"Must be 'oauth_token' or 'private_token'.")
-        
+
         # Create GitLab instance based on authentication method
         try:
             if auth_method == "oauth_token":
@@ -134,6 +135,21 @@ class GitLabProvider(GitProvider):
                 out[cur_path] = s.split("=", 1)[1].strip()
         return out
 
+    def _host_and_path_from_url(self, url: str) -> tuple[str | None, str | None]:
+        """Extract host and project path from a Git URL."""
+        try:
+            if url.startswith("git@") and ":" in url:
+                host_part = url.split("@", 1)[1]
+                host, path = host_part.split(":", 1)
+            else:
+                parsed = urllib.parse.urlparse(url)
+                host, path = parsed.hostname, parsed.path.lstrip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            return host, path or None
+        except Exception:
+            return None, None
+
     def _url_to_project_path(self, url: str) -> str | None:
         """
         Convert ssh/https GitLab URL to 'group/subgroup/repo' project path.
@@ -191,21 +207,18 @@ class GitLabProvider(GitProvider):
 
         return None
 
-    def _compare_submodule(self, proj_path: str, old_sha: str, new_sha: str) -> list[dict]:
-        """
-        Call repository_compare on submodule project; return list of diffs.
-        """
+    def _compare_submodule(self, proj, old_sha: str, new_sha: str) -> list[dict]:
+        """Call repository_compare on submodule project; return list of diffs."""
         try:
-            proj = self._project_by_path(proj_path)
-            if proj is None:
-                get_logger().warning(f"[submodule] resolve failed for {proj_path}")
-                return []
             cmp = proj.repository_compare(old_sha, new_sha)
             if isinstance(cmp, dict):
                 return cmp.get("diffs", []) or []
             return []
         except Exception as e:
-            get_logger().warning(f"[submodule] compare failed for {proj_path} {old_sha}..{new_sha}: {e}")
+            proj_path = getattr(proj, "path_with_namespace", "?")
+            get_logger().warning(
+                f"[submodule] compare failed for {proj_path} {old_sha}..{new_sha}: {e}"
+            )
             return []
 
     def _expand_submodule_changes(self, changes: list[dict]) -> list[dict]:
@@ -239,16 +252,42 @@ class GitLabProvider(GitProvider):
             sub_path = ch.get("new_path") or ch.get("old_path") or ""
             repo_url = gitmodules.get(sub_path)
             if not repo_url:
-                get_logger().warning(f"[submodule] no url for '{sub_path}' in .gitmodules (skip)")
+                get_logger().warning(
+                    f"[submodule] no url for '{sub_path}' in .gitmodules (skip)"
+                )
                 continue
 
-            proj_path = self._url_to_project_path(repo_url)
-            if not proj_path:
-                get_logger().warning(f"[submodule] cannot parse project path from url '{repo_url}' (skip)")
+            host, proj_path = self._host_and_path_from_url(repo_url)
+            if not host or not proj_path:
+                get_logger().warning(
+                    f"[submodule] cannot parse host/namespace from url '{repo_url}' (skip)"
+                )
                 continue
 
-            get_logger().info(f"[submodule] {sub_path} url={repo_url} -> proj_path={proj_path}")
-            sub_diffs = self._compare_submodule(proj_path, old_sha, new_sha)
+            proj = self._project_by_path(proj_path)
+            if proj is None:
+                get_logger().warning(
+                    f"[submodule] resolve failed for {proj_path} (skip)"
+                )
+                continue
+
+            proj_host = urllib.parse.urlparse(getattr(proj, "web_url", "")).hostname
+            proj_ns = getattr(proj, "path_with_namespace", "")
+            if host.lower() != (proj_host or "").lower():
+                get_logger().warning(
+                    f"[submodule] host mismatch for url '{repo_url}' (skip)"
+                )
+                continue
+            if proj_ns.lower() != proj_path.lower():
+                get_logger().warning(
+                    f"[submodule] namespace mismatch for url '{repo_url}' (skip)"
+                )
+                continue
+
+            get_logger().info(
+                f"[submodule] {sub_path} url={repo_url} -> proj_path={proj_path}"
+            )
+            sub_diffs = self._compare_submodule(proj, old_sha, new_sha)
             for sd in sub_diffs:
                 sd_diff = sd.get("diff") or ""
                 sd_old = sd.get("old_path") or sd.get("a_path") or ""
@@ -341,11 +380,11 @@ class GitLabProvider(GitProvider):
         """Create or update a file in the GitLab repository."""
         try:
             project = self.gl.projects.get(self.id_project)
-            
+
             if not message:
                 action = "Update" if contents else "Create"
                 message = f"{action} {file_path}"
-            
+
             try:
                 existing_file = project.files.get(file_path, branch)
                 existing_file.content = contents
@@ -784,14 +823,14 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot add eyes reaction: merge request ID is not set.")
                 return None
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
-            
+
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return None
-            
+
             award_emoji = comment.awardemojis.create({
                 'name': 'eyes'
             })
@@ -805,20 +844,20 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot remove reaction: merge request ID is not set.")
                 return False
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
 
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return False
-            
+
             reactions = comment.awardemojis.list()
             for reaction in reactions:
                 if reaction.name == reaction_id:
                     reaction.delete()
                     return True
-            
+
             get_logger().warning(f"Reaction '{reaction_id}' not found in comment {issue_comment_id}.")
             return False
         except Exception as e:
