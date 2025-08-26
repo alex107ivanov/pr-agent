@@ -141,7 +141,65 @@ class TestGitLabProvider:
         mock_file = MagicMock(ProjectFile)
         mock_file.decode.return_value = content
         mock_project.files.get.return_value = mock_file
-        
+
         result = gitlab_provider.get_pr_file_content("test.md", "main")
-        
-        assert result == expected 
+
+        assert result == expected
+
+    def test_get_gitmodules_map_quoted_paths(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = type('MR', (), {'target_branch': 'main', 'source_branch': 'feature'})()
+        mock_file = MagicMock(ProjectFile)
+        mock_file.decode.return_value = (
+            """
+[submodule "mod1"]
+    path = "libs/foo"
+    url = "git@example.com:foo.git"
+"""
+        )
+        mock_project.files.get.return_value = mock_file
+
+        result = gitlab_provider._get_gitmodules_map()
+
+        assert result == {"libs/foo": "git@example.com:foo.git"}
+
+    def test_get_gitmodules_map_multiple_submodules(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = type('MR', (), {'target_branch': 'main', 'source_branch': 'feature'})()
+        mock_file = MagicMock(ProjectFile)
+        mock_file.decode.return_value = (
+            """
+[submodule "mod1"]
+    path = libs/foo
+    url = https://example.com/foo.git
+[submodule "mod2"]
+    path = libs/bar
+    url = https://example.com/bar.git
+"""
+        )
+        mock_project.files.get.return_value = mock_file
+
+        result = gitlab_provider._get_gitmodules_map()
+
+        assert result == {
+            "libs/foo": "https://example.com/foo.git",
+            "libs/bar": "https://example.com/bar.git",
+        }
+
+    def test_get_gitmodules_map_commented_lines(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = type('MR', (), {'target_branch': 'main', 'source_branch': 'feature'})()
+        mock_file = MagicMock(ProjectFile)
+        mock_file.decode.return_value = (
+            """
+# Initial comment
+[submodule "mod1"]
+    path = libs/foo # inline comment
+    url = https://example.com/foo.git # trailing comment
+# [submodule "ignored"]
+#    path = libs/ignored
+#    url = https://example.com/ignored.git
+"""
+        )
+        mock_project.files.get.return_value = mock_file
+
+        result = gitlab_provider._get_gitmodules_map()
+
+        assert result == {"libs/foo": "https://example.com/foo.git"}

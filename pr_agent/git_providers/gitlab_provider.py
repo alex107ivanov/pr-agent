@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import re
+import configparser
 from typing import Optional, Tuple, Any, Union
 from urllib.parse import urlparse, parse_qs
 import urllib.parse
@@ -123,15 +124,22 @@ class GitLabProvider(GitProvider):
             return {}
 
         out: dict[str, str] = {}
-        cur_path: str | None = None
-        for line in content.splitlines():
-            s = line.strip()  # ensure 's' is str
-            if s.startswith("[submodule"):
-                cur_path = None
-            elif s.startswith("path ="):
-                cur_path = s.split("=", 1)[1].strip()
-            elif s.startswith("url =") and cur_path:
-                out[cur_path] = s.split("=", 1)[1].strip()
+
+        parser = configparser.RawConfigParser(inline_comment_prefixes=("#", ";"))
+        try:
+            parser.read_string(content)
+        except Exception:
+            return out
+
+        for section in parser.sections():
+            if not section.lower().startswith("submodule"):
+                continue
+            path = parser.get(section, "path", fallback=None)
+            url = parser.get(section, "url", fallback=None)
+            if path and url:
+                path = path.strip().strip('"').strip("'")
+                url = url.strip().strip('"').strip("'")
+                out[path] = url
         return out
 
     def _url_to_project_path(self, url: str) -> str | None:
