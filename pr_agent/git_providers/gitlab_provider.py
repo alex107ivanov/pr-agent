@@ -1,13 +1,14 @@
 import difflib
 import hashlib
 import re
-from typing import Optional, Tuple, Any, Union
-from urllib.parse import urlparse, parse_qs
 import urllib.parse
+from typing import Any, Optional, Tuple, Union
+from urllib.parse import parse_qs, urlparse
 
 import gitlab
 import requests
-from gitlab import GitlabGetError, GitlabAuthenticationError, GitlabCreateError, GitlabUpdateError
+from gitlab import (GitlabAuthenticationError, GitlabCreateError,
+                    GitlabGetError, GitlabUpdateError)
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
@@ -39,12 +40,12 @@ class GitLabProvider(GitProvider):
             raise ValueError("GitLab personal access token is not set in the config file")
         # Authentication method selection via configuration
         auth_method = get_settings().get("GITLAB.AUTH_TYPE", "oauth_token")
-        
+
         # Basic validation of authentication type
         if auth_method not in ["oauth_token", "private_token"]:
             raise ValueError(f"Unsupported GITLAB.AUTH_TYPE: '{auth_method}'. "
                            f"Must be 'oauth_token' or 'private_token'.")
-        
+
         # Create GitLab instance based on authentication method
         try:
             if auth_method == "oauth_token":
@@ -134,18 +135,59 @@ class GitLabProvider(GitProvider):
                 out[cur_path] = s.split("=", 1)[1].strip()
         return out
 
+    def _get_superproject_path(self) -> str | None:
+        """Return path_with_namespace of the current project (cached)."""
+        if getattr(self, "_superproject_path", None):
+            return self._superproject_path
+        try:
+            proj = self.gl.projects.get(self.id_project)
+            self._superproject_path = getattr(proj, "path_with_namespace", None)
+            return self._superproject_path
+        except Exception:
+            return None
+
     def _url_to_project_path(self, url: str) -> str | None:
         """
-        Convert ssh/https GitLab URL to 'group/subgroup/repo' project path.
+        Convert ssh/https/relative GitLab URL to 'group/subgroup/repo' project path.
+        Validates that the URL host matches the provider host and resolves '../'
+        style relative URLs using the superproject namespace.
         """
         try:
+            base_host = urllib.parse.urlparse(self.gl.url).netloc.lower().rstrip("/")
+
             if url.startswith("git@") and ":" in url:
-                path = url.split(":", 1)[1]
-            else:
-                path = urllib.parse.urlparse(url).path.lstrip("/")
+                host_part, path = url.split(":", 1)
+                host = host_part.split("@", 1)[1].lower().rstrip("/")
+                if host != base_host:
+                    raise ValueError(f"url host '{host}' does not match '{base_host}'")
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path or None
+
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme or parsed.netloc:
+                host = parsed.netloc.lower().rstrip("/")
+                if host and host != base_host:
+                    raise ValueError(f"url host '{host}' does not match '{base_host}'")
+                path = parsed.path.lstrip("/")
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path or None
+
+            base_path = self._get_superproject_path()
+            if not base_path:
+                return None
+            base_url = f"{self.gl.url.rstrip('/')}/{base_path}/"
+            resolved = urllib.parse.urlparse(urllib.parse.urljoin(base_url, url))
+            host = resolved.netloc.lower().rstrip("/")
+            if host and host != base_host:
+                raise ValueError(f"url host '{host}' does not match '{base_host}'")
+            path = resolved.path.lstrip("/")
             if path.endswith(".git"):
                 path = path[:-4]
             return path or None
+        except ValueError:
+            raise
         except Exception:
             return None
 
@@ -242,7 +284,11 @@ class GitLabProvider(GitProvider):
                 get_logger().warning(f"[submodule] no url for '{sub_path}' in .gitmodules (skip)")
                 continue
 
-            proj_path = self._url_to_project_path(repo_url)
+            try:
+                proj_path = self._url_to_project_path(repo_url)
+            except ValueError:
+                get_logger().warning(f"[submodule] url '{repo_url}' does not match host {self.gl.url} (skip)")
+                continue
             if not proj_path:
                 get_logger().warning(f"[submodule] cannot parse project path from url '{repo_url}' (skip)")
                 continue
@@ -341,11 +387,11 @@ class GitLabProvider(GitProvider):
         """Create or update a file in the GitLab repository."""
         try:
             project = self.gl.projects.get(self.id_project)
-            
+
             if not message:
                 action = "Update" if contents else "Create"
                 message = f"{action} {file_path}"
-            
+
             try:
                 existing_file = project.files.get(file_path, branch)
                 existing_file.content = contents
@@ -784,14 +830,14 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot add eyes reaction: merge request ID is not set.")
                 return None
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
-            
+
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return None
-            
+
             award_emoji = comment.awardemojis.create({
                 'name': 'eyes'
             })
@@ -805,20 +851,20 @@ class GitLabProvider(GitProvider):
             if not self.id_mr:
                 get_logger().warning("Cannot remove reaction: merge request ID is not set.")
                 return False
-            
+
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
             comment = mr.notes.get(issue_comment_id)
 
             if not comment:
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return False
-            
+
             reactions = comment.awardemojis.list()
             for reaction in reactions:
                 if reaction.name == reaction_id:
                     reaction.delete()
                     return True
-            
+
             get_logger().warning(f"Reaction '{reaction_id}' not found in comment {issue_comment_id}.")
             return False
         except Exception as e:
