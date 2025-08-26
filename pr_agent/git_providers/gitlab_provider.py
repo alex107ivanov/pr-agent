@@ -68,6 +68,10 @@ class GitLabProvider(GitProvider):
         self.diff_files = None
         self.git_files = None
         self.temp_comments = []
+        # Cache for submodule comparisons keyed by
+        # (proj_path, old_sha, new_sha). Cleared when a new merge request is
+        # loaded via _set_merge_request to avoid stale data.
+        self._submodule_diff_cache: dict[tuple[str, str, str], list[dict]] = {}
         self.pr_url = merge_request_url
         self._set_merge_request(merge_request_url)
         self.RE_HUNK_HEADER = re.compile(
@@ -210,8 +214,12 @@ class GitLabProvider(GitProvider):
 
     def _expand_submodule_changes(self, changes: list[dict]) -> list[dict]:
         """
-        If enabled, expand 'Subproject commit' bumps into real file diffs from the submodule.
-        Soft-fail on any issue.
+        If enabled, expand 'Subproject commit' bumps into real file diffs from
+        the submodule. Results are cached by ``(proj_path, old_sha, new_sha)``
+        so subsequent calls with the same tuple reuse the comparison. The cache
+        lives for the lifetime of the provider instance and is cleared when
+        ``_set_merge_request`` loads a new merge request. Soft-fail on any
+        issue.
         """
         try:
             if not bool(get_settings().get("GITLAB.EXPAND_SUBMODULE_DIFFS", False)):
@@ -248,7 +256,14 @@ class GitLabProvider(GitProvider):
                 continue
 
             get_logger().info(f"[submodule] {sub_path} url={repo_url} -> proj_path={proj_path}")
-            sub_diffs = self._compare_submodule(proj_path, old_sha, new_sha)
+            key = (proj_path, old_sha, new_sha)
+            # Reuse cached comparisons to avoid duplicate API calls across
+            # get_diff_files/get_files/get_relevant_diff.
+            if key in self._submodule_diff_cache:
+                sub_diffs = self._submodule_diff_cache[key]
+            else:
+                sub_diffs = self._compare_submodule(proj_path, old_sha, new_sha)
+                self._submodule_diff_cache[key] = sub_diffs
             for sd in sub_diffs:
                 sd_diff = sd.get("diff") or ""
                 sd_old = sd.get("old_path") or sd.get("a_path") or ""
@@ -318,6 +333,10 @@ class GitLabProvider(GitProvider):
     def _set_merge_request(self, merge_request_url: str):
         self.id_project, self.id_mr = self._parse_merge_request_url(merge_request_url)
         self.mr = self._get_merge_request()
+        # Reset cached data when MR context changes
+        self.diff_files = None
+        self.git_files = None
+        self._submodule_diff_cache = {}
         try:
             self.last_diff = self.mr.diffs.list(get_all=True)[-1]
         except IndexError as e:
