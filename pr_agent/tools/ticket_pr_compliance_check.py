@@ -99,12 +99,18 @@ async def extract_tickets(git_provider):
             jira_settings = get_settings().get('jira', {}) or {}
             jira_email = jira_settings.get('jira_api_email')
             jira_token = jira_settings.get('jira_api_token')
+            allow_self_signed = jira_settings.get('jira_allow_self_signed', False)
             clients = {}
             for ticket in jira_tickets:
                 base = ticket['base_url']
                 if base not in clients:
                     try:
-                        clients[base] = Jira(url=base, username=jira_email, password=jira_token)
+                        clients[base] = Jira(
+                            url=base,
+                            username=jira_email,
+                            password=jira_token,
+                            verify_ssl=not allow_self_signed,
+                        )
                     except Exception as e:
                         get_logger().error(
                             f"Error connecting to Jira server {base}: {e}",
