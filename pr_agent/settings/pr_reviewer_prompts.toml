@@ -217,10 +217,10 @@ Ticket Description:
 #####
 {%- endif %}
 
-{%- if ticket.requirements %}
+{%- if ticket.get('requirements') %}
 Ticket Requirements:
 #####
-{{ ticket.requirements }}
+{{ ticket.get('requirements') }}
 #####
 {%- endif %}
 =====

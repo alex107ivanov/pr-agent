@@ -48,6 +48,7 @@ def test_extract_tickets_from_jira_token_auth():
         assert ticket['title'] == 'Test issue'
         assert ticket['body'] == 'Issue body'
         assert 'bug' in ticket['labels']
+        assert ticket['requirements'] == ''
 
     asyncio.run(run())
 

@@ -145,6 +145,7 @@ async def extract_tickets(git_provider):
                         'title': fields.get('summary', ""),
                         'body': body,
                         'labels': ", ".join(labels),
+                        'requirements': '',
                     })
                 except Exception as e:
                     get_logger().error(
@@ -208,7 +209,8 @@ async def extract_tickets(git_provider):
                         'title': issue_main.title,
                         'body': issue_body_str,
                         'labels': ", ".join(labels),
-                        'sub_issues': sub_issues_content
+                        'sub_issues': sub_issues_content,
+                        'requirements': '',
                     })
 
         elif isinstance(git_provider, AzureDevopsProvider):
