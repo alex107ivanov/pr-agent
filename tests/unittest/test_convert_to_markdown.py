@@ -49,7 +49,7 @@ class TestConvertToMarkdown:
     # Tests that the function works correctly with a simple dictionary input
     def test_simple_dictionary_input(self):
         input_data = {'review': {
-            'estimated_effort_to_review_[1-5]': '1, because the changes are minimal and straightforward, focusing on a single functionality addition.\n',
+            'estimated_effort_to_review': '1, because the changes are minimal and straightforward, focusing on a single functionality addition.\n',
             'relevant_tests': 'No\n', 'possible_issues': 'No\n', 'security_concerns': 'No\n'}}
 
         expected_output = textwrap.dedent(f"""\
@@ -70,7 +70,7 @@ class TestConvertToMarkdown:
 
     def test_simple_dictionary_input_without_gfm_supported(self):
         input_data = {'review': {
-            'estimated_effort_to_review_[1-5]': '1, because the changes are minimal and straightforward, focusing on a single functionality addition.\n',
+            'estimated_effort_to_review': '1, because the changes are minimal and straightforward, focusing on a single functionality addition.\n',
             'relevant_tests': 'No\n', 'possible_issues': 'No\n', 'security_concerns': 'No\n'}}
 
         expected_output = textwrap.dedent("""\

@@ -234,7 +234,7 @@ class PRReviewer:
         first_key = 'review'
         last_key = 'security_concerns'
         data = load_yaml(self.prediction.strip(),
-                         keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:", "key_issues_to_review:",
+                         keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review:", "security_concerns:", "key_issues_to_review:",
                                         "relevant_file:", "relevant_line:", "suggestion:"],
                          first_key=first_key, last_key=last_key)
         github_action_output(data, 'review')
@@ -376,7 +376,7 @@ class PRReviewer:
             try:
                 review_labels = []
                 if get_settings().pr_reviewer.enable_review_labels_effort:
-                    estimated_effort = data['review']['estimated_effort_to_review_[1-5]']
+                    estimated_effort = data['review']['estimated_effort_to_review']
                     estimated_effort_number = 0
                     if isinstance(estimated_effort, str):
                         try:
@@ -391,7 +391,14 @@ class PRReviewer:
                         review_labels.append(f'Review effort {estimated_effort_number}/5')
                 if get_settings().pr_reviewer.enable_review_labels_security and get_settings().pr_reviewer.require_security_review:
                     security_concerns = data['review']['security_concerns']  # yes, because ...
-                    security_concerns_bool = 'yes' in security_concerns.lower() or 'true' in security_concerns.lower()
+                    get_logger().debug(f"Security concerns: {security_concerns}")
+                    if isinstance(security_concerns, bool):
+                        security_concerns_bool = security_concerns
+                    elif isinstance(security_concerns, str):
+                        security_concerns_bool = 'yes' in security_concerns.lower() or 'true' in security_concerns.lower()
+                    else:
+                        get_logger().info(f"Unknown type of the security concerns field (not str, not bool): {security_concerns}")
+                        security_concerns_bool = False
                     if security_concerns_bool:
                         review_labels.append('Possible security concern')
 
