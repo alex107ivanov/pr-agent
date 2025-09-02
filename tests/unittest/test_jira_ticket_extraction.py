@@ -16,11 +16,11 @@ class DummyProvider:
         return "Implements https://jira.example.com/browse/PROJ-123"
 
 
-def test_extract_tickets_from_jira():
+def test_extract_tickets_from_jira_token_auth():
     settings = get_settings()
+    settings.set('jira', {})
     settings.set('jira', {
-        'jira_api_email': 'user@example.com',
-        'jira_api_token': 'secret',
+        'jira_token': 'secret',
     })
 
     issue_data = {
@@ -35,8 +35,13 @@ def test_extract_tickets_from_jira():
     mock_jira.issue.return_value = issue_data
 
     async def run():
-        with patch('pr_agent.tools.ticket_pr_compliance_check.Jira', return_value=mock_jira):
+        with patch('pr_agent.tools.ticket_pr_compliance_check.Jira', return_value=mock_jira) as jira_cls:
             result = await extract_tickets(DummyProvider())
+            jira_cls.assert_called_with(
+                url='https://jira.example.com',
+                token='secret',
+                verify_ssl=True,
+            )
         assert result
         ticket = result[0]
         assert ticket['ticket_id'] == 'PROJ-123'
@@ -47,12 +52,14 @@ def test_extract_tickets_from_jira():
     asyncio.run(run())
 
 
-def test_extract_tickets_from_jira_self_signed():
+def test_extract_tickets_from_jira_user_password_self_signed():
     settings = get_settings()
+    settings.set('jira', {})
     settings.set('jira', {
-        'jira_api_email': 'user@example.com',
-        'jira_api_token': 'secret',
+        'jira_user': 'user@example.com',
+        'jira_password': 'secret',
         'jira_allow_self_signed': True,
+        'jira_token': '',
     })
 
     issue_data = {

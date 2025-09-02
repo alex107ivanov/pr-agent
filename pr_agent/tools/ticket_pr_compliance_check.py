@@ -97,20 +97,33 @@ async def extract_tickets(git_provider):
         jira_tickets = find_jira_tickets(user_description)
         if jira_tickets:
             jira_settings = get_settings().get('jira', {}) or {}
-            jira_email = jira_settings.get('jira_api_email')
-            jira_token = jira_settings.get('jira_api_token')
+            jira_user = jira_settings.get('jira_user')
+            jira_password = jira_settings.get('jira_password')
+            jira_token = jira_settings.get('jira_token')
             allow_self_signed = jira_settings.get('jira_allow_self_signed', False)
             clients = {}
             for ticket in jira_tickets:
                 base = ticket['base_url']
                 if base not in clients:
                     try:
-                        clients[base] = Jira(
-                            url=base,
-                            username=jira_email,
-                            password=jira_token,
-                            verify_ssl=not allow_self_signed,
-                        )
+                        if jira_token:
+                            clients[base] = Jira(
+                                url=base,
+                                token=jira_token,
+                                verify_ssl=not allow_self_signed,
+                            )
+                        elif jira_user and jira_password:
+                            clients[base] = Jira(
+                                url=base,
+                                username=jira_user,
+                                password=jira_password,
+                                verify_ssl=not allow_self_signed,
+                            )
+                        else:
+                            get_logger().warning(
+                                "Jira credentials are not configured; skipping ticket extraction"
+                            )
+                            clients[base] = None
                     except Exception as e:
                         get_logger().error(
                             f"Error connecting to Jira server {base}: {e}",
