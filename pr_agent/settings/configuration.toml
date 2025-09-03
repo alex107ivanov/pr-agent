@@ -74,6 +74,13 @@ enable_claude_extended_thinking = false # Set to true to enable extended thinkin
 extended_thinking_budget_tokens = 2048
 extended_thinking_max_output_tokens = 4096
 
+[jira]
+jira_base_url = ""
+jira_user = ""
+jira_password = ""
+jira_token = ""
+jira_allow_self_signed = false
+
 
 [pr_reviewer] # /review #
 # enable/disable features

@@ -374,10 +374,10 @@ def ticket_markdown_logic(emoji, markdown_text, value, gfm_supported) -> str:
                 ticket_url = ticket_analysis.get('ticket_url', '').strip()
                 explanation = ''
                 ticket_compliance_level = ''  # Individual ticket compliance
-                fully_compliant_str = ticket_analysis.get('fully_compliant_requirements', '').strip()
-                not_compliant_str = ticket_analysis.get('not_compliant_requirements', '').strip()
+                fully_compliant_str = ticket_analysis.get('fully_compliant_requirements', '')
+                not_compliant_str = ticket_analysis.get('not_compliant_requirements', '')
                 requires_further_human_verification = ticket_analysis.get('requires_further_human_verification',
-                                                                          '').strip()
+                                                                          '')
 
                 if not fully_compliant_str and not not_compliant_str:
                     get_logger().debug(f"Ticket compliance has no requirements",

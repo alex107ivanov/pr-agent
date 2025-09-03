@@ -133,8 +133,7 @@ You can create an API token from your Atlassian account:
 
 ```toml
 [jira]
-jira_api_token = "YOUR_API_TOKEN"
-jira_api_email = "YOUR_EMAIL"
+jira_token = "YOUR_API_TOKEN"
 ```
 
 ### Jira Data Center/Server
@@ -207,11 +206,11 @@ You can use your Jira username and password to authenticate with Jira Data Cente
 In your Configuration file/Environment variables/Secrets file, add the following lines:
 
 ```toml
-jira_api_email = "your_username"
-jira_api_token = "your_password"
+jira_user = "your_username"
+jira_password = "your_password"
 ```
 
-(Note that indeed the 'jira_api_email' field is used for the username, and the 'jira_api_token' field is used for the user password.)
+(Note that the 'jira_user' field is used for the username, and the 'jira_password' field is used for the user password.)
 
 ##### Validating Basic authentication via Python script
 
@@ -266,7 +265,7 @@ This following steps will help you check if the basic auth is working correctly,
 ```toml
 [jira]
 jira_base_url = "YOUR_JIRA_BASE_URL" # e.g. https://jira.example.com
-jira_api_token = "YOUR_API_TOKEN"
+jira_token = "YOUR_API_TOKEN"
 ```
 
 ##### Validating PAT token via Python script
@@ -318,13 +317,13 @@ This following steps will help you check if the token is working correctly, and 
 
 Qodo Merge supports connecting to multiple JIRA servers using different authentication methods.
 
-=== "Email/Token (Basic Auth)"
+=== "User/Password (Basic Auth)"
 
-    Configure multiple servers using Email/Token authentication:
+    Configure multiple servers using username/password authentication:
 
     - `jira_servers`: List of JIRA server URLs
-    - `jira_api_token`: List of API tokens (for Cloud) or passwords (for Data Center)
-    - `jira_api_email`: List of emails (for Cloud) or usernames (for Data Center)
+    - `jira_user`: List of usernames
+    - `jira_password`: List of passwords
     - `jira_base_url`: Default server for ticket IDs like `PROJ-123`, Each repository can configure (local config file) its own `jira_base_url` to choose which server to use by default.
 
     **Example Configuration:**
@@ -333,11 +332,11 @@ Qodo Merge supports connecting to multiple JIRA servers using different authenti
     # Server URLs
     jira_servers = ["https://company.atlassian.net", "https://datacenter.jira.com"]
 
-    # API tokens/passwords
-    jira_api_token = ["cloud_api_token_here", "datacenter_password"]
+    # Usernames
+    jira_user = ["user@company.com", "datacenter_username"]
 
-    # Emails/usernames (both required)
-    jira_api_email = ["user@company.com", "datacenter_username"]
+    # Passwords
+    jira_password = ["cloud_password", "datacenter_password"]
 
     # Default server for ticket IDs
     jira_base_url = "https://company.atlassian.net"
@@ -348,8 +347,7 @@ Qodo Merge supports connecting to multiple JIRA servers using different authenti
     Configure multiple servers using Personal Access Token authentication:
 
     - `jira_servers`: List of JIRA server URLs
-    - `jira_api_token`: List of PAT tokens
-    - `jira_api_email`: Not needed (can be omitted or left empty)
+    - `jira_token`: List of PAT tokens
     - `jira_base_url`: Default server for ticket IDs like `PROJ-123`, Each repository can configure (local config file) its own `jira_base_url` to choose which server to use by default.
 
     **Example Configuration:**
@@ -359,18 +357,19 @@ Qodo Merge supports connecting to multiple JIRA servers using different authenti
     jira_servers = ["https://server1.jira.com", "https://server2.jira.com"]
 
     # PAT tokens only
-    jira_api_token = ["pat_token_1", "pat_token_2"]
+    jira_token = ["pat_token_1", "pat_token_2"]
 
     # Default server for ticket IDs
     jira_base_url = "https://server1.jira.com"
     ```
 
-    **Mixed Authentication (Email/Token + PAT):**
+    **Mixed Authentication (User/Password + PAT):**
     ```toml
     [jira]
     jira_servers = ["https://company.atlassian.net", "https://server.jira.com"]
-    jira_api_token = ["cloud_api_token", "server_pat_token"]
-    jira_api_email = ["user@company.com", ""]  # Empty for PAT
+    jira_user = ["user@company.com", ""]
+    jira_password = ["cloud_password", ""]
+    jira_token = ["", "server_pat_token"]
     ```
 
 === "Jira Cloud App"

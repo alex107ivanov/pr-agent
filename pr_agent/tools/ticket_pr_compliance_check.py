@@ -1,6 +1,8 @@
 import re
 import traceback
 
+from atlassian import Jira
+
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import GithubProvider
 from pr_agent.git_providers import AzureDevopsProvider
@@ -12,25 +14,42 @@ GITHUB_TICKET_PATTERN = re.compile(
 )
 
 def find_jira_tickets(text):
-    # Regular expression patterns for JIRA tickets
-    patterns = [
-        r'\b[A-Z]{2,10}-\d{1,7}\b',  # Standard JIRA ticket format (e.g., PROJ-123)
-        r'(?:https?://[^\s/]+/browse/)?([A-Z]{2,10}-\d{1,7})\b'  # JIRA URL or just the ticket
-    ]
+    """Return a list of Jira tickets found in the given text.
 
-    tickets = set()
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if isinstance(match, tuple):
-                # If it's a tuple (from the URL pattern), take the last non-empty group
-                ticket = next((m for m in reversed(match) if m), None)
-            else:
-                ticket = match
-            if ticket:
-                tickets.add(ticket)
+    Each ticket is represented as a dictionary with ``ticket_id``,
+    ``base_url`` and ``ticket_url`` keys. If a ticket ID is detected
+    without an explicit URL, the function will try to use the
+    ``jira_base_url`` from the configuration.
+    """
 
-    return list(tickets)
+    tickets = []
+
+    # Capture tickets with full URLs
+    url_pattern = re.compile(r'(https?://[^\s/]+)/browse/([A-Z]{2,10}-\d{1,7})')
+    for base_url, ticket_id in url_pattern.findall(text):
+        base = base_url.rstrip('/')
+        tickets.append({
+            'ticket_id': ticket_id,
+            'base_url': base,
+            'ticket_url': f"{base}/browse/{ticket_id}",
+        })
+
+    # Capture bare ticket IDs using configured base URL
+    config_base = get_settings().get('jira.jira_base_url')
+    if config_base:
+        config_base = config_base.rstrip('/')
+        id_pattern = re.compile(r'\b([A-Z]{2,10}-\d{1,7})\b')
+        existing = {t['ticket_id'] for t in tickets}
+        for ticket_id in id_pattern.findall(text):
+            if ticket_id not in existing:
+                tickets.append({
+                    'ticket_id': ticket_id,
+                    'base_url': config_base,
+                    'ticket_url': f"{config_base}/browse/{ticket_id}",
+                })
+
+    # Limit to three tickets to keep context short
+    return tickets[:3]
 
 
 def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url_html='https://github.com'):
@@ -66,29 +85,95 @@ def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url
 
 async def extract_tickets(git_provider):
     MAX_TICKET_CHARACTERS = 10000
+    tickets_content = []
+
+    try:
+        user_description = git_provider.get_user_description()
+    except Exception:
+        user_description = ""
+
+    # Jira tickets extraction
+    try:
+        jira_tickets = find_jira_tickets(user_description)
+        if jira_tickets:
+            jira_settings = get_settings().get('jira', {}) or {}
+            jira_user = jira_settings.get('jira_user')
+            jira_password = jira_settings.get('jira_password')
+            jira_token = jira_settings.get('jira_token')
+            allow_self_signed = jira_settings.get('jira_allow_self_signed', False)
+            clients = {}
+            for ticket in jira_tickets:
+                base = ticket['base_url']
+                if base not in clients:
+                    try:
+                        if jira_token:
+                            clients[base] = Jira(
+                                url=base,
+                                token=jira_token,
+                                verify_ssl=not allow_self_signed,
+                            )
+                        elif jira_user and jira_password:
+                            clients[base] = Jira(
+                                url=base,
+                                username=jira_user,
+                                password=jira_password,
+                                verify_ssl=not allow_self_signed,
+                            )
+                        else:
+                            get_logger().warning(
+                                "Jira credentials are not configured; skipping ticket extraction"
+                            )
+                            clients[base] = None
+                    except Exception as e:
+                        get_logger().error(
+                            f"Error connecting to Jira server {base}: {e}",
+                            artifact={"traceback": traceback.format_exc()})
+                        clients[base] = None
+                jira_client = clients.get(base)
+                if not jira_client:
+                    continue
+                try:
+                    issue = jira_client.issue(ticket['ticket_id'])
+                    fields = issue.get('fields', {})
+                    body = fields.get('description') or ""
+                    if len(body) > MAX_TICKET_CHARACTERS:
+                        body = body[:MAX_TICKET_CHARACTERS] + "..."
+                    labels = fields.get('labels', [])
+                    tickets_content.append({
+                        'ticket_id': ticket['ticket_id'],
+                        'ticket_url': ticket['ticket_url'],
+                        'title': fields.get('summary', ""),
+                        'body': body,
+                        'labels': ", ".join(labels),
+                        'requirements': '',
+                    })
+                except Exception as e:
+                    get_logger().error(
+                        f"Failed to fetch Jira ticket {ticket['ticket_id']}: {e}",
+                        artifact={"traceback": traceback.format_exc()})
+    except Exception as e:
+        get_logger().error(
+            f"Error extracting Jira tickets error= {e}",
+            artifact={"traceback": traceback.format_exc()})
+
+    # GitHub Issues extraction
     try:
         if isinstance(git_provider, GithubProvider):
-            user_description = git_provider.get_user_description()
-            tickets = extract_ticket_links_from_pr_description(user_description, git_provider.repo, git_provider.base_url_html)
-            tickets_content = []
-
+            tickets = extract_ticket_links_from_pr_description(
+                user_description, git_provider.repo, git_provider.base_url_html)
             if tickets:
-
                 for ticket in tickets:
                     repo_name, original_issue_number = git_provider._parse_issue_url(ticket)
-
                     try:
                         issue_main = git_provider.repo_obj.get_issue(original_issue_number)
                     except Exception as e:
-                        get_logger().error(f"Error getting main issue: {e}",
-                                           artifact={"traceback": traceback.format_exc()})
+                        get_logger().error(
+                            f"Error getting main issue: {e}",
+                            artifact={"traceback": traceback.format_exc()})
                         continue
-
                     issue_body_str = issue_main.body or ""
                     if len(issue_body_str) > MAX_TICKET_CHARACTERS:
                         issue_body_str = issue_body_str[:MAX_TICKET_CHARACTERS] + "..."
-
-                    # Extract sub-issues
                     sub_issues_content = []
                     try:
                         sub_issues = git_provider.fetch_sub_issues(ticket)
@@ -96,71 +181,64 @@ async def extract_tickets(git_provider):
                             try:
                                 sub_repo, sub_issue_number = git_provider._parse_issue_url(sub_issue_url)
                                 sub_issue = git_provider.repo_obj.get_issue(sub_issue_number)
-
                                 sub_body = sub_issue.body or ""
                                 if len(sub_body) > MAX_TICKET_CHARACTERS:
                                     sub_body = sub_body[:MAX_TICKET_CHARACTERS] + "..."
-
                                 sub_issues_content.append({
                                     'ticket_url': sub_issue_url,
                                     'title': sub_issue.title,
                                     'body': sub_body
                                 })
                             except Exception as e:
-                                get_logger().warning(f"Failed to fetch sub-issue content for {sub_issue_url}: {e}")
-
+                                get_logger().warning(
+                                    f"Failed to fetch sub-issue content for {sub_issue_url}: {e}")
                     except Exception as e:
-                        get_logger().warning(f"Failed to fetch sub-issues for {ticket}: {e}")
-
-                    # Extract labels
+                        get_logger().warning(
+                            f"Failed to fetch sub-issues for {ticket}: {e}")
                     labels = []
                     try:
                         for label in issue_main.labels:
                             labels.append(label.name if hasattr(label, 'name') else label)
                     except Exception as e:
-                        get_logger().error(f"Error extracting labels error= {e}",
-                                           artifact={"traceback": traceback.format_exc()})
-
+                        get_logger().error(
+                            f"Error extracting labels error= {e}",
+                            artifact={"traceback": traceback.format_exc()})
                     tickets_content.append({
                         'ticket_id': issue_main.number,
                         'ticket_url': ticket,
                         'title': issue_main.title,
                         'body': issue_body_str,
                         'labels': ", ".join(labels),
-                        'sub_issues': sub_issues_content  # Store sub-issues content
+                        'sub_issues': sub_issues_content,
+                        'requirements': '',
                     })
-
-                return tickets_content
 
         elif isinstance(git_provider, AzureDevopsProvider):
             tickets_info = git_provider.get_linked_work_items()
-            tickets_content = []
             for ticket in tickets_info:
                 try:
                     ticket_body_str = ticket.get("body", "")
                     if len(ticket_body_str) > MAX_TICKET_CHARACTERS:
                         ticket_body_str = ticket_body_str[:MAX_TICKET_CHARACTERS] + "..."
-
-                    tickets_content.append(
-                        {
-                            "ticket_id": ticket.get("id"),
-                            "ticket_url": ticket.get("url"),
-                            "title": ticket.get("title"),
-                            "body": ticket_body_str,
-                            "requirements": ticket.get("acceptance_criteria", ""),
-                            "labels": ", ".join(ticket.get("labels", [])),
-                        }
-                    )
+                    tickets_content.append({
+                        "ticket_id": ticket.get("id"),
+                        "ticket_url": ticket.get("url"),
+                        "title": ticket.get("title"),
+                        "body": ticket_body_str,
+                        "requirements": ticket.get("acceptance_criteria", ""),
+                        "labels": ", ".join(ticket.get("labels", [])),
+                    })
                 except Exception as e:
                     get_logger().error(
                         f"Error processing Azure DevOps ticket: {e}",
                         artifact={"traceback": traceback.format_exc()},
                     )
-            return tickets_content
-
     except Exception as e:
-        get_logger().error(f"Error extracting tickets error= {e}",
-                           artifact={"traceback": traceback.format_exc()})
+        get_logger().error(
+            f"Error extracting tickets error= {e}",
+            artifact={"traceback": traceback.format_exc()})
+
+    return tickets_content or None
 
 
 async def extract_and_cache_pr_tickets(git_provider, vars):
